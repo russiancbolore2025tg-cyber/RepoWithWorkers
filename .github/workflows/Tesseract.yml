@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'Tesseract *'
+      - 'Tesseract-*' # Исправлен триггер для правильных тегов
 
 jobs:
   build:
@@ -217,8 +217,14 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Get Tesseract version
         run: |
-          VER=$(grep -m1 'project.*VERSION' tesseract/CMakeLists.txt \
-                | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "git")
+          # Читаем версию из файла VERSION (если он есть), убирая символы переноса строки
+          VER=$(cat tesseract/VERSION 2>/dev/null | tr -d '\r\n')
+          
+          # Если файл не найден или пуст, используем дефолтное слово "git"
+          if[ -z "$VER" ]; then
+            VER="git"
+          fi
+          
           COMMIT=$(git -C tesseract rev-parse --short HEAD)
           echo "TESS_VERSION=${VER}-${COMMIT}" >> $GITHUB_ENV
 
@@ -238,7 +244,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "Tesseract ${{ env.TESS_VERSION }}"
+          tag_name: "Tesseract-${{ env.TESS_VERSION }}" # <- Пробел заменен на дефис
           name: "Tesseract OCR ${{ env.TESS_VERSION }} · Android API ${{ env.ANDROID_API }} arm64-v8a"
           body: |
             ## Tesseract OCR — fat .so для ReMandre / exteragram

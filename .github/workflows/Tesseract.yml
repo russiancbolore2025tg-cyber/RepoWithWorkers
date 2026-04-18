@@ -11,7 +11,7 @@ on:
 env:
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
   OUTPUT_DIR: ${{ github.workspace }}/output
-  TRIPLET_NAME: arm64-android
+  TRIPLET_NAME: arm64-android-static
   TARGET_API: 30
 
 jobs:
@@ -25,9 +25,8 @@ jobs:
 
       - run: mkdir -p ${{ env.OUTPUT_DIR }}
 
-      - name: Set Android NDK Env
-        run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+      - run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - uses: actions/cache@v4
         with:
@@ -35,9 +34,9 @@ jobs:
             ${{ env.VCPKG_ROOT }}/installed
             ${{ env.VCPKG_ROOT }}/downloads
             ~/.cache/vcpkg
-          key: ${{ runner.os }}-vcpkg-tess-core-${{ hashFiles('**/*.yml') }}
+          key: ${{ runner.os }}-vcpkg-tess-ndk25-${{ hashFiles('**/*.yml') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-tess-core-
+            ${{ runner.os }}-vcpkg-tess-ndk25-
 
       - run: |
           if [ ! -d "${{ env.VCPKG_ROOT }}" ]; then
@@ -61,7 +60,7 @@ jobs:
 
       - run: |
           cd ${{ env.VCPKG_ROOT }}
-          ./vcpkg install "tesseract[core]:${{ env.TRIPLET_NAME }}" --head --overlay-triplets=custom-triplets
+          ./vcpkg install tesseract:${{ env.TRIPLET_NAME }} --head --overlay-triplets=custom-triplets
 
       - run: |
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'Tesseract-*' # Исправлен триггер для правильных тегов
+      - 'Tesseract-*' # Триггер для тегов
 
 jobs:
   build:
@@ -244,7 +244,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "Tesseract-${{ env.TESS_VERSION }}" # <- Пробел заменен на дефис
+          tag_name: "Tesseract-${{ env.TESS_VERSION }}"
           name: "Tesseract OCR ${{ env.TESS_VERSION }} · Android API ${{ env.ANDROID_API }} arm64-v8a"
           body: |
             ## Tesseract OCR — fat .so для ReMandre / exteragram

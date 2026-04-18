@@ -9,14 +9,13 @@ on:
         default: 'Tesseract-latest'
 
 env:
-  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
   OUTPUT_DIR: ${{ github.workspace }}/output
-  TRIPLET_NAME: arm64-android-api30
+  TRIPLET_NAME: arm64-android-static
   TARGET_API: 30
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
@@ -26,52 +25,58 @@ jobs:
       - run: mkdir -p ${{ env.OUTPUT_DIR }}
 
       - run: |
-          NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
-          if [ ! -d "$NDK_PATH" ]; then
-            NDK_PATH=$(ls -d $ANDROID_HOME/ndk/* | sort -V | head -n 1)
-          fi
-          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - uses: actions/cache@v4
         with:
           path: |
-            ${{ env.VCPKG_ROOT }}/installed
-            ${{ env.VCPKG_ROOT }}/downloads
+            ${{ github.workspace }}/vcpkg
             ~/.cache/vcpkg
           key: ${{ runner.os }}-vcpkg-tess-${{ hashFiles('**/*.yml') }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-tess-
 
       - run: |
-          if [ ! -d "${{ env.VCPKG_ROOT }}" ]; then
-            git clone https://github.com/microsoft/vcpkg.git ${{ env.VCPKG_ROOT }}
+          if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
+            git clone https://github.com/microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
+            cd ${{ github.workspace }}/vcpkg
+            ./bootstrap-vcpkg.sh -disableMetrics
           fi
-          cd ${{ env.VCPKG_ROOT }}
-          ./bootstrap-vcpkg.sh -disableMetrics
 
       - run: |
-          TRIPLET_DIR="${{ env.VCPKG_ROOT }}/custom-triplets"
-          mkdir -p "$TRIPLET_DIR"
+          mkdir -p project/custom-triplets
+          cd project
           
-          cat << EOF > "$TRIPLET_DIR/${{ env.TRIPLET_NAME }}.cmake"
+          cat << EOF > vcpkg.json
+          {
+            "name": "tesseract-android",
+            "version": "1.0.0",
+            "dependencies": [
+              {
+                "name": "tesseract",
+                "default-features": false
+              }
+            ]
+          }
+          EOF
+          
+          cat << EOF > custom-triplets/${{ env.TRIPLET_NAME }}.cmake
           set(VCPKG_TARGET_ARCHITECTURE arm64)
           set(VCPKG_CRT_LINKAGE dynamic)
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_CMAKE_SYSTEM_NAME Android)
           set(VCPKG_CMAKE_SYSTEM_VERSION ${{ env.TARGET_API }})
-          set(VCPKG_ENV_PASSTHROUGH ANDROID_NDK_HOME)
+          set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "\$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
           EOF
-
-      - run: |
-          cd ${{ env.VCPKG_ROOT }}
-          ./vcpkg install tesseract:${{ env.TRIPLET_NAME }} --head --overlay-triplets=custom-triplets
+          
+          ${{ github.workspace }}/vcpkg/vcpkg install --triplet ${{ env.TRIPLET_NAME }} --overlay-triplets=custom-triplets
 
       - run: |
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$NDK_BIN/aarch64-linux-android${{ env.TARGET_API }}-clang++"
           STRIP="$NDK_BIN/llvm-strip"
           
-          LIB_DIR="${{ env.VCPKG_ROOT }}/installed/${{ env.TRIPLET_NAME }}/lib"
+          LIB_DIR="project/vcpkg_installed/${{ env.TRIPLET_NAME }}/lib"
           STATIC_LIBS=$(find "$LIB_DIR" -maxdepth 1 -name "*.a" -print)
           
           if [ -z "$STATIC_LIBS" ]; then

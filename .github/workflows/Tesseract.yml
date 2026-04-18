@@ -186,15 +186,10 @@ jobs:
             2>&1 | tee /tmp/cmake_out.log ; CMAKE_EXIT=${PIPESTATUS[0]}
 
           if [ $CMAKE_EXIT -ne 0 ] || grep -q "Configuring incomplete" /tmp/cmake_out.log; then
-            echo "====== LAST 150 LINES OF CMAKE OUTPUT ======"
-            tail -150 /tmp/cmake_out.log
-            echo "====== ALL CMake*.log files ======"
-            find "$TESS_BUILD" -name "CMake*.log" | while read f; do
-              echo "--- $f ---"
-              cat "$f"
-            done
-            echo "====== tesseract/CMakeLists.txt around find_package calls ======"
-            grep -n "find_package\|find_library\|target_link" tesseract/CMakeLists.txt | tail -40
+            echo "====== CMAKE ERRORS (grep) ======"
+            grep -i "error\|Error\|ERROR\|failed\|Failed" /tmp/cmake_out.log | grep -v "^--" || true
+            echo "====== LINES AFTER 'Precompiled headers' ======"
+            grep -A 999 "Precompiled headers enabled" /tmp/cmake_out.log | head -80
             exit 1
           fi
 

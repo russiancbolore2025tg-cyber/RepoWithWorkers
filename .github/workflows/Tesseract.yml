@@ -1,92 +1,284 @@
-import ctypes
-import os
-from java import jclass
-from java.nio import ByteBuffer
-from android.graphics import BitmapFactory, Bitmap
-from remandre import ReLoad
+name: Build Tesseract OCR for Android (ReMandre)
 
-# --- 1. Настраиваем обертку C API через ctypes ---
-def setup_tesseract_api(lib):
-    # void* TessBaseAPICreate()
-    lib.TessBaseAPICreate.restype = ctypes.c_void_p
-    
-    # int TessBaseAPIInit3(void* handle, const char* datapath, const char* language)
-    lib.TessBaseAPIInit3.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-    lib.TessBaseAPIInit3.restype = ctypes.c_int
-    
-    # void TessBaseAPISetImage(void* handle, const unsigned char* imagedata, int width, int height, int bytes_per_pixel, int bytes_per_line)
-    lib.TessBaseAPISetImage.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    
-    # char* TessBaseAPIGetUTF8Text(void* handle)
-    lib.TessBaseAPIGetUTF8Text.argtypes = [ctypes.c_void_p]
-    lib.TessBaseAPIGetUTF8Text.restype = ctypes.POINTER(ctypes.c_char)
-    
-    # void TessDeleteText(char* text)
-    lib.TessDeleteText.argtypes = [ctypes.POINTER(ctypes.c_char)]
-    
-    # void TessBaseAPIDelete(void* handle)
-    lib.TessBaseAPIDelete.argtypes = [ctypes.c_void_p]
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'Tesseract-*' # Триггер для тегов
 
-# --- 2. Функция распознавания ---
-def recognize_text(image_path: str, tessdata_dir: str, lang: str = "rus+eng") -> str:
-    loader = ReLoad.get()
-    tess_lib = loader.loaded_modules.get("tesseract")
-    if not tess_lib:
-        return "Ошибка: модуль Tesseract не загружен!"
-        
-    setup_tesseract_api(tess_lib)
-    
-    # Декодируем картинку средствами Android
-    bmp = BitmapFactory.decodeFile(image_path)
-    if not bmp:
-        return "Ошибка: не удалось прочитать картинку"
-        
-    # Приводим к формату ARGB_8888 (4 байта на пиксель)
-    bmp = bmp.copy(Bitmap.Config.ARGB_8888, False)
-    w, h = bmp.getWidth(), bmp.getHeight()
-    bytes_per_pixel = 4
-    bytes_per_line = w * bytes_per_pixel
-    
-    # Вытаскиваем сырые байты пикселей через Chaquopy
-    buffer = ByteBuffer.allocate(bmp.getByteCount())
-    bmp.copyPixelsToBuffer(buffer)
-    raw_pixels = bytes(buffer.array()) # Конвертируем Java byte[] в Python bytes
-    
-    # Создаем экземпляр Tesseract
-    api_handle = tess_lib.TessBaseAPICreate()
-    
-    try:
-        # Инициализируем (datapath — это путь к родительской папке папки tessdata)
-        # Например, если файл лежит в /data/.../files/tessdata/rus.traineddata,
-        # то datapath должен быть "/data/.../files/"
-        init_res = tess_lib.TessBaseAPIInit3(
-            api_handle, 
-            tessdata_dir.encode('utf-8'), 
-            lang.encode('utf-8')
-        )
-        
-        if init_res != 0:
-            return "Ошибка: не удалось инициализировать Tesseract (проверьте .traineddata)"
-            
-        # Передаем сырые пиксели
-        tess_lib.TessBaseAPISetImage(
-            api_handle, 
-            raw_pixels, 
-            w, h, 
-            bytes_per_pixel, 
-            bytes_per_line
-        )
-        
-        # Получаем текст
-        text_ptr = tess_lib.TessBaseAPIGetUTF8Text(api_handle)
-        if text_ptr:
-            # Читаем Си-строку до нулевого байта
-            result_text = ctypes.cast(text_ptr, ctypes.c_char_p).value.decode('utf-8')
-            # Обязательно освобождаем память, выделенную Tesseract!
-            tess_lib.TessDeleteText(text_ptr)
-            return result_text.strip()
-        return ""
-        
-    finally:
-        # Уничтожаем инстанс (освобождаем память)
-        tess_lib.TessBaseAPIDelete(api_handle)
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      ANDROID_API: 30
+      ABI: arm64-v8a
+      ARCH: aarch64
+      TRIPLE: aarch64-linux-android
+      NDK_VERSION: r27c
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. Checkout
+      # ─────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────
+      # 2. NDK
+      # ─────────────────────────────────────────────
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "${NDK_ZIP}"
+          echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$PWD/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 3. Host tools
+      # ─────────────────────────────────────────────
+      - name: Install host build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            autoconf automake libtool \
+            wget git ca-certificates python3
+
+      # ─────────────────────────────────────────────
+      # 4. Clone sources
+      # ─────────────────────────────────────────────
+      - name: Clone latest Leptonica
+        run: git clone --depth=1 https://github.com/DanBloomberg/leptonica.git leptonica
+
+      - name: Clone latest Tesseract
+        run: git clone --depth=1 https://github.com/tesseract-ocr/tesseract.git tesseract
+
+      - name: Print versions
+        run: |
+          echo "=== Leptonica ===" && git -C leptonica log --oneline -1
+          echo "=== Tesseract  ===" && git -C tesseract  log --oneline -1
+
+      # ─────────────────────────────────────────────
+      # 5. Cross-compile env
+      # ─────────────────────────────────────────────
+      - name: Set cross-compile env
+        run: |
+          echo "CC=${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang"     >> $GITHUB_ENV
+          echo "CXX=${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang++"  >> $GITHUB_ENV
+          echo "AR=${TOOLCHAIN}/bin/llvm-ar"                           >> $GITHUB_ENV
+          echo "RANLIB=${TOOLCHAIN}/bin/llvm-ranlib"                   >> $GITHUB_ENV
+          echo "STRIP=${TOOLCHAIN}/bin/llvm-strip"                     >> $GITHUB_ENV
+          echo "SYSROOT=${TOOLCHAIN}/sysroot"                          >> $GITHUB_ENV
+          echo "PREFIX=$PWD/install"                                   >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 6. Build Leptonica (static)
+      # ─────────────────────────────────────────────
+      - name: Build Leptonica (static)
+        run: |
+          mkdir -p leptonica/build && cd leptonica/build
+          cmake .. \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DENABLE_WEBP=OFF \
+            -DENABLE_OPENJPEG=OFF \
+            -DENABLE_GIF=OFF \
+            -DENABLE_TIFF=OFF \
+            -DENABLE_JPEG=OFF \
+            -DENABLE_PNG=OFF \
+            -DENABLE_ZLIB=OFF \
+            -DENABLE_PROGRAMS=OFF
+          ninja -j$(nproc)
+          ninja install
+
+      # ─────────────────────────────────────────────
+      # 7. Build cpu_features (Tesseract dependency)
+      # ─────────────────────────────────────────────
+      - name: Build cpu_features
+        run: |
+          git clone --depth=1 https://github.com/google/cpu_features.git cpu_features_src
+          mkdir -p cpu_features_build && cd cpu_features_build
+          cmake ../cpu_features_src \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_EXECUTABLE=OFF
+          ninja -j$(nproc)
+          ninja install
+
+      # ─────────────────────────────────────────────
+      # 8. Patch Tesseract CMakeLists for cross-compile
+      # ─────────────────────────────────────────────
+      - name: Patch Tesseract CMakeLists
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          path = "tesseract/CMakeLists.txt"
+          txt = open(path).read()
+
+          # 1. Remove find_package(CpuFeaturesNdkCompat ...) multiline block
+          txt = re.sub(
+              r'find_package\s*\(\s*CpuFeaturesNdkCompat[^)]*\)',
+              '# find_package(CpuFeaturesNdkCompat) -- disabled',
+              txt, flags=re.DOTALL
+          )
+
+          # 2. Remove ALL lines with CpuFeatures:: targets (ndk_compat etc.)
+          txt = re.sub(r'[^\n]*(CpuFeaturesNdkCompat::|CpuFeatures::ndk_compat)[^\n]*\n', '', txt)
+
+          # 3. find_package(SW REQUIRED) -> find_package(SW)  [SW = optional package manager]
+          txt = re.sub(r'find_package\s*\(\s*SW\s+REQUIRED\s*\)', 'find_package(SW)', txt)
+
+          open(path, 'w').write(txt)
+          print("Patch done. Remaining refs:")
+          for i, line in enumerate(txt.splitlines(), 1):
+              if any(x in line for x in ['CpuFeatures', 'find_package(SW']):
+                  print(f"  L{i}: {line.strip()}")
+          PYEOF
+
+      # ─────────────────────────────────────────────
+      # 9. Build Tesseract (shared fat .so)
+      # ─────────────────────────────────────────────
+      - name: Build Tesseract (shared, fat .so)
+        run: |
+          export PKG_CONFIG_LIBDIR="${PREFIX}/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+          unset PKG_CONFIG_PATH
+
+          TESS_BUILD="$PWD/tesseract/build"
+          mkdir -p "$TESS_BUILD"
+
+          cmake -S "$PWD/tesseract" -B "$TESS_BUILD" \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLeptonica_DIR="${PREFIX}/lib/cmake/leptonica" \
+            -DCMAKE_PREFIX_PATH="${PREFIX}" \
+            -DCMAKE_FIND_ROOT_PATH="${PREFIX};${SYSROOT}" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+            -DBUILD_TRAINING_TOOLS=OFF \
+            -DINSTALL_CONFIGS=OFF \
+            -DGRAPHICS_DISABLED=ON \
+            -DHAVE_NEON=ON \
+            -DLEPT_TIFF_RESULT=FAILED_TO_RUN \
+            -DLEPT_TIFF_COMPILE_SUCCESS=0 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -Wl,--exclude-libs,ALL" \
+            --log-level=VERBOSE \
+            2>&1 | tee /tmp/cmake_out.log ; CMAKE_EXIT=${PIPESTATUS[0]}
+
+          if [ $CMAKE_EXIT -ne 0 ] || grep -q "Configuring incomplete" /tmp/cmake_out.log; then
+            grep -A 5 "try_run\|CMake Error" /tmp/cmake_out.log || true
+            find "$TESS_BUILD" -name "TryRunResults.cmake" -exec cat {} +
+            exit 1
+          fi
+
+          cmake --build "$TESS_BUILD" -- -j$(nproc)
+          cmake --install "$TESS_BUILD" 
+
+      # ─────────────────────────────────────────────
+      # 10. Inspect and strip .so
+      # ─────────────────────────────────────────────
+      - name: Inspect and strip .so
+        run: |
+          SO=$(find install/lib -name "libtesseract*.so" | head -1)
+          echo "Found: $SO"
+          echo "Size before strip: $(du -sh $SO | cut -f1)"
+          "${TOOLCHAIN}/bin/llvm-readelf" -d "$SO" | grep NEEDED
+          ${STRIP} --strip-unneeded "$SO"
+          echo "Size after strip: $(du -sh $SO | cut -f1)"
+          cp "$SO" tesseract.so
+          echo "SO_PATH=$PWD/tesseract.so" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 11. Get version
+      # ─────────────────────────────────────────────
+      - name: Get Tesseract version
+        run: |
+          # Читаем версию из файла VERSION (если он есть), убирая символы переноса строки
+          VER=$(cat tesseract/VERSION 2>/dev/null | tr -d '\r\n')
+          
+          # Если файл не найден или пуст, используем дефолтное слово "git"
+          if [ -z "$VER" ]; then
+            VER="git"
+          fi
+          
+          COMMIT=$(git -C tesseract rev-parse --short HEAD)
+          echo "TESS_VERSION=${VER}-${COMMIT}" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 12. Upload artifact
+      # ─────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tesseract-android-api${{ env.ANDROID_API }}-${{ env.ABI }}
+          path: tesseract.so
+          retention-days: 30
+
+      # ─────────────────────────────────────────────
+      # 13. Create GitHub Release
+      # ─────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "Tesseract-${{ env.TESS_VERSION }}"
+          name: "Tesseract OCR ${{ env.TESS_VERSION }} · Android API ${{ env.ANDROID_API }} arm64-v8a"
+          body: |
+            ## Tesseract OCR — fat .so для ReMandre / exteragram
+
+            | Параметр | Значение |
+            |---|---|
+            | Tesseract commit | `${{ env.TESS_VERSION }}` |
+            | Android API | ${{ env.ANDROID_API }} |
+            | ABI | arm64-v8a |
+            | Зависимости | статически слинкованы внутри .so |
+            | Внешние зависимости | только `libc`, `libm`, `libdl` (Android system) |
+
+            ### Как использовать в плагине (ReMandre)
+
+            ```python
+            __ReqRements__ = {
+                "tesseract": "https://github.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/releases/latest/download/tesseract.so - Tesseract OCR engine"
+            }
+            ```
+
+            Затем в коде плагина:
+            ```python
+            from remandre import ReLoad
+            import ctypes, os
+
+            loader = ReLoad.get()
+            lib = loader.loaded_modules["tesseract"]
+            # или вручную:
+            # lib = ctypes.CDLL(os.path.join(loader.root, "tesseract.so"))
+            ```
+
+            > Файл кладётся в `files/remandre_modules/tesseract.so` автоматически при первом запуске плагина.
+          files: tesseract.so
+          generate_release_notes: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

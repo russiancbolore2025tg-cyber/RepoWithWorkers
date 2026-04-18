@@ -112,10 +112,10 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Build cpu_features (NDK compat)
         run: |
-          # cpu_features идёт прямо в NDK — просто собираем его статически
-          CPU_FEAT_SRC="${NDK_ROOT}/sources/third_party/cpu_features"
+          # В NDK r27 cpu_features убрали из sources/third_party — клонируем напрямую
+          git clone --depth=1 https://github.com/google/cpu_features.git cpu_features_src
           mkdir -p cpu_features_build && cd cpu_features_build
-          cmake "${CPU_FEAT_SRC}" \
+          cmake ../cpu_features_src \
             -GNinja \
             -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="${ABI}" \
@@ -124,7 +124,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
             -DBUILD_TESTING=OFF \
-            -DBUILD_SHARED_LIBS=OFF
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_EXECUTABLE=OFF
           ninja -j$(nproc)
           ninja install
 

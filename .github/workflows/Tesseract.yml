@@ -130,11 +130,28 @@ jobs:
           ninja install
 
       # ─────────────────────────────────────────────
-      # 8. Собираем Tesseract как SHARED .so
+      # 8. Патчим Tesseract — убираем find_package(CpuFeaturesNdkCompat)
+      #    (нужен только для Gradle-сборок, при NDK toolchain не нужен)
+      # ─────────────────────────────────────────────
+      - name: Patch Tesseract CMakeLists (remove CpuFeaturesNdkCompat)
+        run: |
+          # Комментируем find_package и все упоминания таргета
+          sed -i 's/find_package(CpuFeaturesNdkCompat/# find_package(CpuFeaturesNdkCompat/g' tesseract/CMakeLists.txt
+          sed -i '/CpuFeaturesNdkCompat::/s/^/# /' tesseract/CMakeLists.txt
+          echo "--- CpuFeatures lines after patch ---"
+          grep -n "CpuFeatures" tesseract/CMakeLists.txt || echo "None left — good"
+
+      # ─────────────────────────────────────────────
+      # 9. Собираем Tesseract как SHARED .so
       #    со статически влинкованными зависимостями
       # ─────────────────────────────────────────────
       - name: Build Tesseract (shared, fat .so)
         run: |
+          # Изолируем pkg-config от хостовых библиотек
+          export PKG_CONFIG_LIBDIR="${PREFIX}/lib/pkgconfig:${SYSROOT}/usr/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+          unset PKG_CONFIG_PATH
+
           mkdir -p tesseract/build && cd tesseract/build
           cmake .. \
             -GNinja \
@@ -146,12 +163,13 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
             -DBUILD_SHARED_LIBS=ON \
             -DLeptonica_DIR="${PREFIX}/lib/cmake/leptonica" \
-            -DCpuFeaturesNdkCompat_DIR="${PREFIX}/lib/cmake/CpuFeaturesNdkCompat" \
             -DCMAKE_PREFIX_PATH="${PREFIX}" \
-            -DCMAKE_FIND_ROOT_PATH="${PREFIX}" \
+            -DCMAKE_FIND_ROOT_PATH="${PREFIX};${SYSROOT}" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
             -DBUILD_TRAINING_TOOLS=OFF \
             -DINSTALL_CONFIGS=OFF \
             -DGRAPHICS_DISABLED=ON \
+            -DHAVE_NEON=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++" \
             -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -Wl,--exclude-libs,ALL"
           ninja -j$(nproc)

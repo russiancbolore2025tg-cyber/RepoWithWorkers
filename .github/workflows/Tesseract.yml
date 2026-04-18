@@ -10,12 +10,12 @@ on:
 
 env:
   OUTPUT_DIR: ${{ github.workspace }}/output
-  TRIPLET_NAME: arm64-android
+  TRIPLET_NAME: arm64-android-api30
   TARGET_API: 30
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -24,33 +24,22 @@ jobs:
 
       - run: mkdir -p ${{ env.OUTPUT_DIR }}
 
-      - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/vcpkg
-            ~/.cache/vcpkg
-          key: ${{ runner.os }}-vcpkg-tess-${{ hashFiles('**/*.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-vcpkg-tess-
-
       - run: |
           if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
             git clone https://github.com/microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
-            cd ${{ github.workspace }}/vcpkg
-            ./bootstrap-vcpkg.sh -disableMetrics
           fi
+          cd ${{ github.workspace }}/vcpkg
+          ./bootstrap-vcpkg.sh -disableMetrics
 
       - run: |
-          mkdir -p project/custom-triplets
-          cd project
+          mkdir -p build_dir/custom-triplets
+          cd build_dir
           
           cat << EOF > vcpkg.json
           {
             "name": "tesseract-android",
             "version": "1.0.0",
-            "dependencies":[
+            "dependencies": [
               {
                 "name": "tesseract",
                 "default-features": false
@@ -65,16 +54,17 @@ jobs:
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_CMAKE_SYSTEM_NAME Android)
           set(VCPKG_CMAKE_SYSTEM_VERSION ${{ env.TARGET_API }})
+          set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "${ANDROID_NDK_LATEST_HOME}/build/cmake/android.toolchain.cmake")
           EOF
           
           ${{ github.workspace }}/vcpkg/vcpkg install --triplet ${{ env.TRIPLET_NAME }} --overlay-triplets=custom-triplets
 
       - run: |
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$NDK_BIN/aarch64-linux-android${{ env.TARGET_API }}-clang++"
           STRIP="$NDK_BIN/llvm-strip"
           
-          LIB_DIR="project/vcpkg_installed/${{ env.TRIPLET_NAME }}/lib"
+          LIB_DIR="build_dir/vcpkg_installed/${{ env.TRIPLET_NAME }}/lib"
           STATIC_LIBS=$(find "$LIB_DIR" -maxdepth 1 -name "*.a" -print)
           
           if [ -z "$STATIC_LIBS" ]; then

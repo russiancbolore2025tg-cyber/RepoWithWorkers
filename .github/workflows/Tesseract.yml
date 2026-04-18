@@ -131,22 +131,23 @@ jobs:
           path = "tesseract/CMakeLists.txt"
           txt = open(path).read()
 
-          # Remove find_package(CpuFeaturesNdkCompat ...) — multiline, up to closing paren
+          # 1. Remove find_package(CpuFeaturesNdkCompat ...) multiline block
           txt = re.sub(
               r'find_package\s*\(\s*CpuFeaturesNdkCompat[^)]*\)',
-              '# find_package(CpuFeaturesNdkCompat) -- disabled for NDK cross-compile',
+              '# find_package(CpuFeaturesNdkCompat) -- disabled',
               txt, flags=re.DOTALL
           )
 
-          # Remove any target_link_libraries lines referencing CpuFeaturesNdkCompat
-          txt = re.sub(r'[^\n]*CpuFeaturesNdkCompat::[^\n]*\n', '\n', txt)
+          # 2. Remove ALL lines with CpuFeatures:: targets (ndk_compat etc.)
+          txt = re.sub(r'[^\n]*(CpuFeaturesNdkCompat::|CpuFeatures::ndk_compat)[^\n]*\n', '', txt)
+
+          # 3. find_package(SW REQUIRED) -> find_package(SW)  [SW = optional package manager]
+          txt = re.sub(r'find_package\s*\(\s*SW\s+REQUIRED\s*\)', 'find_package(SW)', txt)
 
           open(path, 'w').write(txt)
-          print("Patch done")
-
-          # Show what remains
+          print("Patch done. Remaining refs:")
           for i, line in enumerate(txt.splitlines(), 1):
-              if 'CpuFeatures' in line:
+              if any(x in line for x in ['CpuFeatures', 'find_package(SW']):
                   print(f"  L{i}: {line.strip()}")
           PYEOF
 

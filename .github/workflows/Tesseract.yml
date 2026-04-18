@@ -25,15 +25,19 @@ jobs:
 
       - run: mkdir -p ${{ env.OUTPUT_DIR }}
 
+      - name: Set Android NDK Env
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+
       - uses: actions/cache@v4
         with:
           path: |
             ${{ env.VCPKG_ROOT }}/installed
             ${{ env.VCPKG_ROOT }}/downloads
             ~/.cache/vcpkg
-          key: ${{ runner.os }}-vcpkg-tess-${{ hashFiles('**/*.yml') }}
+          key: ${{ runner.os }}-vcpkg-tess-core-${{ hashFiles('**/*.yml') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-tess-
+            ${{ runner.os }}-vcpkg-tess-core-
 
       - run: |
           if [ ! -d "${{ env.VCPKG_ROOT }}" ]; then
@@ -52,15 +56,15 @@ jobs:
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_CMAKE_SYSTEM_NAME Android)
           set(VCPKG_CMAKE_SYSTEM_VERSION ${{ env.TARGET_API }})
+          set(VCPKG_ENV_PASSTHROUGH ANDROID_NDK_HOME)
           EOF
 
       - run: |
-          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           cd ${{ env.VCPKG_ROOT }}
-          ./vcpkg install tesseract:${{ env.TRIPLET_NAME }} --head --overlay-triplets=custom-triplets
+          ./vcpkg install "tesseract[core]:${{ env.TRIPLET_NAME }}" --head --overlay-triplets=custom-triplets
 
       - run: |
-          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$NDK_BIN/aarch64-linux-android${{ env.TARGET_API }}-clang++"
           STRIP="$NDK_BIN/llvm-strip"
           

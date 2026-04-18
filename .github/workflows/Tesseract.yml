@@ -186,10 +186,10 @@ jobs:
             2>&1 | tee /tmp/cmake_out.log ; CMAKE_EXIT=${PIPESTATUS[0]}
 
           if [ $CMAKE_EXIT -ne 0 ] || grep -q "Configuring incomplete" /tmp/cmake_out.log; then
-            echo "====== CMAKE ERRORS (grep) ======"
-            grep -i "error\|Error\|ERROR\|failed\|Failed" /tmp/cmake_out.log | grep -v "^--" || true
-            echo "====== LINES AFTER 'Precompiled headers' ======"
-            grep -A 999 "Precompiled headers enabled" /tmp/cmake_out.log | head -80
+            echo "====== try_run FULL CONTEXT ======"
+            grep -A 10 "try_run" /tmp/cmake_out.log || true
+            echo "====== TryRunResults ======"
+            find "$TESS_BUILD" -name "TryRunResults.cmake" -exec cat {} +
             exit 1
           fi
 

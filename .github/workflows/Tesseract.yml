@@ -221,7 +221,7 @@ jobs:
           VER=$(cat tesseract/VERSION 2>/dev/null | tr -d '\r\n')
           
           # Если файл не найден или пуст, используем дефолтное слово "git"
-          if[ -z "$VER" ]; then
+          if [ -z "$VER" ]; then
             VER="git"
           fi
           

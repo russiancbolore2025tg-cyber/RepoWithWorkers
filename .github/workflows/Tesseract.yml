@@ -1,90 +1,220 @@
-name: Build Tesseract OCR
+name: Build Tesseract OCR for Android (ReMandre)
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release Tag Name'
-        required: true
-        default: 'Tesseract-latest'
-
-env:
-  OUTPUT_DIR: ${{ github.workspace }}/output
-  TRIPLET_NAME: arm64-android-api30
-  TARGET_API: 30
+  push:
+    tags:
+      - 'Tesseract *'
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API: 30
+      ABI: arm64-v8a
+      ARCH: aarch64
+      TRIPLE: aarch64-linux-android
+      NDK_VERSION: r27c
 
     steps:
-      - uses: actions/checkout@v4
+      # ─────────────────────────────────────────────
+      # 1. Checkout (нужен только для наличия workflow)
+      # ─────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - run: mkdir -p ${{ env.OUTPUT_DIR }}
+      # ─────────────────────────────────────────────
+      # 2. Установка NDK
+      # ─────────────────────────────────────────────
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "${NDK_ZIP}"
+          echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$PWD/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      - run: |
-          if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
-            git clone https://github.com/microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
-          fi
-          cd ${{ github.workspace }}/vcpkg
-          ./bootstrap-vcpkg.sh -disableMetrics
+      # ─────────────────────────────────────────────
+      # 3. Зависимости хоста для сборки
+      # ─────────────────────────────────────────────
+      - name: Install host build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            autoconf automake libtool \
+            wget git ca-certificates
 
-      - run: |
-          mkdir -p build_dir/custom-triplets
-          cd build_dir
-          
-          cat << EOF > vcpkg.json
-          {
-            "name": "tesseract-android",
-            "version": "1.0.0",
-            "dependencies": [
-              {
-                "name": "tesseract",
-                "default-features": false
-              }
-            ]
-          }
-          EOF
-          
-          cat << EOF > custom-triplets/${{ env.TRIPLET_NAME }}.cmake
-          set(VCPKG_TARGET_ARCHITECTURE arm64)
-          set(VCPKG_CRT_LINKAGE dynamic)
-          set(VCPKG_LIBRARY_LINKAGE static)
-          set(VCPKG_CMAKE_SYSTEM_NAME Android)
-          set(VCPKG_CMAKE_SYSTEM_VERSION ${{ env.TARGET_API }})
-          set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "${ANDROID_NDK_LATEST_HOME}/build/cmake/android.toolchain.cmake")
-          EOF
-          
-          ${{ github.workspace }}/vcpkg/vcpkg install --triplet ${{ env.TRIPLET_NAME }} --overlay-triplets=custom-triplets
+      # ─────────────────────────────────────────────
+      # 4. Клонируем ПОСЛЕДНИЕ исходники
+      # ─────────────────────────────────────────────
+      - name: Clone latest Leptonica
+        run: |
+          git clone --depth=1 https://github.com/DanBloomberg/leptonica.git leptonica
 
-      - run: |
-          NDK_BIN="${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          CXX="$NDK_BIN/aarch64-linux-android${{ env.TARGET_API }}-clang++"
-          STRIP="$NDK_BIN/llvm-strip"
-          
-          LIB_DIR="build_dir/vcpkg_installed/${{ env.TRIPLET_NAME }}/lib"
-          STATIC_LIBS=$(find "$LIB_DIR" -maxdepth 1 -name "*.a" -print)
-          
-          if [ -z "$STATIC_LIBS" ]; then
-            exit 1
-          fi
-          
-          FINAL_SO="${{ env.OUTPUT_DIR }}/libtesseract.so"
-          
-          $CXX -shared -fPIC -Wl,-soname,libtesseract.so \
-            -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
-            -static-libstdc++ \
-            -llog -lz -lm -landroid \
-            -o "$FINAL_SO"
-            
-          $STRIP --strip-unneeded "$FINAL_SO"
+      - name: Clone latest Tesseract
+        run: |
+          git clone --depth=1 https://github.com/tesseract-ocr/tesseract.git tesseract
 
-      - uses: softprops/action-gh-release@v2
+      - name: Print versions
+        run: |
+          echo "=== Leptonica ===" && git -C leptonica log --oneline -1
+          echo "=== Tesseract  ===" && git -C tesseract  log --oneline -1
+
+      # ─────────────────────────────────────────────
+      # 5. Toolchain-переменные для cross-compile
+      # ─────────────────────────────────────────────
+      - name: Set cross-compile env
+        run: |
+          CLANG="${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang"
+          CLANGPP="${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang++"
+          AR="${TOOLCHAIN}/bin/llvm-ar"
+          RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          STRIP="${TOOLCHAIN}/bin/llvm-strip"
+
+          echo "CC=$CLANG"        >> $GITHUB_ENV
+          echo "CXX=$CLANGPP"     >> $GITHUB_ENV
+          echo "AR=$AR"           >> $GITHUB_ENV
+          echo "RANLIB=$RANLIB"   >> $GITHUB_ENV
+          echo "STRIP=$STRIP"     >> $GITHUB_ENV
+          echo "SYSROOT=${TOOLCHAIN}/sysroot" >> $GITHUB_ENV
+          echo "PREFIX=$PWD/install" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 6. Собираем Leptonica (статически)
+      # ─────────────────────────────────────────────
+      - name: Build Leptonica (static)
+        run: |
+          mkdir -p leptonica/build && cd leptonica/build
+          cmake .. \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DENABLE_WEBP=OFF \
+            -DENABLE_OPENJPEG=OFF \
+            -DENABLE_GIF=OFF \
+            -DENABLE_TIFF=OFF \
+            -DENABLE_JPEG=OFF \
+            -DENABLE_PNG=OFF \
+            -DENABLE_ZLIB=OFF \
+            -DENABLE_PROGRAMS=OFF
+          ninja -j$(nproc)
+          ninja install
+
+      # ─────────────────────────────────────────────
+      # 7. Собираем Tesseract как SHARED .so
+      #    со статически влинкованными зависимостями
+      # ─────────────────────────────────────────────
+      - name: Build Tesseract (shared, fat .so)
+        run: |
+          mkdir -p tesseract/build && cd tesseract/build
+          cmake .. \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLeptonica_DIR="${PREFIX}/lib/cmake/leptonica" \
+            -DCMAKE_FIND_ROOT_PATH="${PREFIX}" \
+            -DBUILD_TRAINING_TOOLS=OFF \
+            -DINSTALL_CONFIGS=OFF \
+            -DGRAPHICS_DISABLED=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -Wl,--exclude-libs,ALL"
+          ninja -j$(nproc)
+          ninja install
+
+      # ─────────────────────────────────────────────
+      # 8. Проверяем .so и убираем лишние символы
+      # ─────────────────────────────────────────────
+      - name: Inspect and strip .so
+        run: |
+          SO=$(find install/lib -name "libtesseract*.so" | head -1)
+          echo "Found: $SO"
+          echo "Size before strip: $(du -sh $SO | cut -f1)"
+
+          # Показываем внешние зависимости (должны быть только system libs)
+          "${TOOLCHAIN}/bin/llvm-readelf" -d "$SO" | grep NEEDED
+
+          # Strip debug symbols (оставляем export table)
+          ${STRIP} --strip-unneeded "$SO"
+          echo "Size after strip: $(du -sh $SO | cut -f1)"
+
+          # Переименовываем в tesseract.so (как ожидает ReMandre по __ReqRements__)
+          cp "$SO" tesseract.so
+          echo "SO_PATH=$PWD/tesseract.so" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 9. Получаем версию Tesseract для тега релиза
+      # ─────────────────────────────────────────────
+      - name: Get Tesseract version
+        run: |
+          VER=$(grep -m1 'project.*VERSION' tesseract/CMakeLists.txt \
+                | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "git")
+          COMMIT=$(git -C tesseract rev-parse --short HEAD)
+          echo "TESS_VERSION=${VER}-${COMMIT}" >> $GITHUB_ENV
+          echo "TAG=Tesseract ${VER}-${COMMIT}" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 10. Upload artifact (для отладки без релиза)
+      # ─────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: ${{ github.event.inputs.release_tag }}
-          files: ${{ env.OUTPUT_DIR }}/libtesseract.so
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+          name: tesseract-android-api${{ env.ANDROID_API }}-${{ env.ABI }}
+          path: tesseract.so
+          retention-days: 30
+
+      # ─────────────────────────────────────────────
+      # 11. Создаём GitHub Release с тегом "Tesseract X.Y.Z"
+      # ─────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "Tesseract ${{ env.TESS_VERSION }}"
+          name: "Tesseract OCR ${{ env.TESS_VERSION }} · Android API ${{ env.ANDROID_API }} arm64-v8a"
+          body: |
+            ## Tesseract OCR — fat .so для ReMandre / exteragram
+
+            | Параметр | Значение |
+            |---|---|
+            | Tesseract commit | `${{ env.TESS_VERSION }}` |
+            | Android API | ${{ env.ANDROID_API }} |
+            | ABI | arm64-v8a |
+            | Зависимости | статически слинкованы внутри .so |
+            | Внешние зависимости | только `libc`, `libm`, `libdl` (Android system) |
+
+            ### Как использовать в плагине (ReMandre)
+
+            ```python
+            __ReqRements__ = {
+                "tesseract": "https://github.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/releases/latest/download/tesseract.so - Tesseract OCR engine"
+            }
+            ```
+
+            Затем в коде плагина:
+            ```python
+            from remandre import ReLoad
+            import ctypes
+
+            loader = ReLoad.get()
+            lib = loader.loaded_modules["tesseract"]   # ctypes.CDLL объект
+            # или вручную:
+            # lib = ctypes.CDLL(os.path.join(loader.root, "tesseract.so"))
+            ```
+
+            > Файл кладётся в `files/remandre_modules/tesseract.so` автоматически при первом запуске плагина.
+          files: tesseract.so
+          generate_release_notes: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

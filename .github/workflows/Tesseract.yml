@@ -108,7 +108,28 @@ jobs:
           ninja install
 
       # ─────────────────────────────────────────────
-      # 7. Собираем Tesseract как SHARED .so
+      # 7. Собираем cpu_features из NDK (нужен Tesseract 5.x на Android)
+      # ─────────────────────────────────────────────
+      - name: Build cpu_features (NDK compat)
+        run: |
+          # cpu_features идёт прямо в NDK — просто собираем его статически
+          CPU_FEAT_SRC="${NDK_ROOT}/sources/third_party/cpu_features"
+          mkdir -p cpu_features_build && cd cpu_features_build
+          cmake "${CPU_FEAT_SRC}" \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+          ninja -j$(nproc)
+          ninja install
+
+      # ─────────────────────────────────────────────
+      # 8. Собираем Tesseract как SHARED .so
       #    со статически влинкованными зависимостями
       # ─────────────────────────────────────────────
       - name: Build Tesseract (shared, fat .so)
@@ -124,6 +145,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
             -DBUILD_SHARED_LIBS=ON \
             -DLeptonica_DIR="${PREFIX}/lib/cmake/leptonica" \
+            -DCpuFeaturesNdkCompat_DIR="${PREFIX}/lib/cmake/CpuFeaturesNdkCompat" \
+            -DCMAKE_PREFIX_PATH="${PREFIX}" \
             -DCMAKE_FIND_ROOT_PATH="${PREFIX}" \
             -DBUILD_TRAINING_TOOLS=OFF \
             -DINSTALL_CONFIGS=OFF \
@@ -134,7 +157,7 @@ jobs:
           ninja install
 
       # ─────────────────────────────────────────────
-      # 8. Проверяем .so и убираем лишние символы
+      # 9. Проверяем .so и убираем лишние символы
       # ─────────────────────────────────────────────
       - name: Inspect and strip .so
         run: |
@@ -154,7 +177,7 @@ jobs:
           echo "SO_PATH=$PWD/tesseract.so" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 9. Получаем версию Tesseract для тега релиза
+      # 10. Получаем версию Tesseract для тега релиза
       # ─────────────────────────────────────────────
       - name: Get Tesseract version
         run: |
@@ -165,7 +188,7 @@ jobs:
           echo "TAG=Tesseract ${VER}-${COMMIT}" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 10. Upload artifact (для отладки без релиза)
+      # 11. Upload artifact (для отладки без релиза)
       # ─────────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -175,7 +198,7 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────
-      # 11. Создаём GitHub Release с тегом "Tesseract X.Y.Z"
+      # 12. Создаём GitHub Release с тегом "Tesseract X.Y.Z"
       # ─────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

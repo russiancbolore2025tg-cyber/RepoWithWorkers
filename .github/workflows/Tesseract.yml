@@ -1,0 +1,111 @@
+name: Build Tesseract OCR (Android API 30)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag Name (e.g., Tesseract-v5.3.3)'
+        required: true
+        default: 'Tesseract-latest'
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  OUTPUT_DIR: ${{ github.workspace }}/output
+  TRIPLET_NAME: arm64-android-api30
+  TARGET_API: 30
+
+jobs:
+  build-and-release:
+    name: Build and Release Tesseract .so
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Output Directory
+        run: mkdir -p ${{ env.OUTPUT_DIR }}
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/downloads
+            ~/.cache/vcpkg
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/.github/workflows/build-tesseract.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
+
+      - name: Install and Bootstrap vcpkg
+        run: |
+          if [ ! -d "${{ env.VCPKG_ROOT }}" ]; then
+            git clone https://github.com/microsoft/vcpkg.git ${{ env.VCPKG_ROOT }}
+          fi
+          cd ${{ env.VCPKG_ROOT }}
+          ./bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Create Custom Android Triplet
+        run: |
+          TRIPLET_DIR="${{ env.VCPKG_ROOT }}/custom-triplets"
+          mkdir -p "$TRIPLET_DIR"
+          
+          cat << EOF > "$TRIPLET_DIR/${{ env.TRIPLET_NAME }}.cmake"
+          set(VCPKG_TARGET_ARCHITECTURE arm64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          set(VCPKG_CMAKE_SYSTEM_NAME Android)
+          set(VCPKG_CMAKE_SYSTEM_VERSION ${{ env.TARGET_API }})
+          EOF
+
+      - name: Build Tesseract via vcpkg
+        run: |
+          cd ${{ env.VCPKG_ROOT }}
+          ./vcpkg install tesseract:${{ env.TRIPLET_NAME }} --head --overlay-triplets=custom-triplets
+
+      - name: Link and Strip Monolithic Shared Library
+        run: |
+          NDK_LLVM_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CXX="$NDK_LLVM_BIN/aarch64-linux-android${{ env.TARGET_API }}-clang++"
+          STRIP="$NDK_LLVM_BIN/llvm-strip"
+          
+          LIB_DIR="${{ env.VCPKG_ROOT }}/installed/${{ env.TRIPLET_NAME }}/lib"
+          
+          STATIC_LIBS=$(find "$LIB_DIR" -maxdepth 1 -name "*.a" -print)
+          
+          if [ -z "$STATIC_LIBS" ]; then
+            echo "Error: No static libraries found in $LIB_DIR"
+            exit 1
+          fi
+          
+          echo "Linking the following libraries into libtesseract.so:"
+          echo "$STATIC_LIBS"
+          
+          FINAL_SO="${{ env.OUTPUT_DIR }}/libtesseract.so"
+          
+          $CXX -shared -fPIC -Wl,-soname,libtesseract.so \
+            -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
+            -static-libstdc++ \
+            -llog -lz -lm -landroid \
+            -o "$FINAL_SO"
+            
+          echo "Stripping debug symbols to reduce file size..."
+          $STRIP --strip-unneeded "$FINAL_SO"
+          
+          echo "Build successful! File size:"
+          ls -lh "$FINAL_SO"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "Release ${{ github.event.inputs.release_tag }}"
+          files: ${{ env.OUTPUT_DIR }}/libtesseract.so
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## Tesseract OCR (Android API 30)
+            
+            Монолитная библиотека `libtesseract.so` для архитектуры `arm64-v8a`.

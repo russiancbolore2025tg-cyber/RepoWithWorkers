@@ -180,15 +180,15 @@ jobs:
             -DINSTALL_CONFIGS=OFF \
             -DGRAPHICS_DISABLED=ON \
             -DHAVE_NEON=ON \
+            -DLEPT_TIFF_RESULT=FAILED_TO_RUN \
+            -DLEPT_TIFF_COMPILE_SUCCESS=0 \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++" \
             -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -Wl,--exclude-libs,ALL" \
             --log-level=VERBOSE \
             2>&1 | tee /tmp/cmake_out.log ; CMAKE_EXIT=${PIPESTATUS[0]}
 
           if [ $CMAKE_EXIT -ne 0 ] || grep -q "Configuring incomplete" /tmp/cmake_out.log; then
-            echo "====== try_run FULL CONTEXT ======"
-            grep -A 10 "try_run" /tmp/cmake_out.log || true
-            echo "====== TryRunResults ======"
+            grep -A 5 "try_run\|CMake Error" /tmp/cmake_out.log || true
             find "$TESS_BUILD" -name "TryRunResults.cmake" -exec cat {} +
             exit 1
           fi

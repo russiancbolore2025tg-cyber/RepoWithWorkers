@@ -159,8 +159,10 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
           unset PKG_CONFIG_PATH
 
-          mkdir -p tesseract/build && cd tesseract/build
-          cmake .. \
+          TESS_BUILD="$PWD/tesseract/build"
+          mkdir -p "$TESS_BUILD"
+
+          cmake -S "$PWD/tesseract" -B "$TESS_BUILD" \
             -GNinja \
             -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="${ABI}" \
@@ -179,15 +181,18 @@ jobs:
             -DHAVE_NEON=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++" \
             -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -Wl,--exclude-libs,ALL" \
-            2>&1 | tee /tmp/cmake_out.log
-          # Fail explicitly if cmake failed (pipe swallows exit code)
-          grep -q "Configuring incomplete" /tmp/cmake_out.log && {
+            2>&1 | tee /tmp/cmake_out.log ; CMAKE_EXIT=${PIPESTATUS[0]}
+
+          if [ $CMAKE_EXIT -ne 0 ] || grep -q "Configuring incomplete" /tmp/cmake_out.log; then
+            echo "====== FULL cmake stdout/stderr ======"
+            cat /tmp/cmake_out.log
             echo "====== CMakeError.log ======"
-            find tesseract/build -name "CMakeError.log" -exec cat {} +
+            find "$TESS_BUILD" -name "CMakeError.log" -exec echo "--- {} ---" \; -exec cat {} \;
             exit 1
-          } || true
-          ninja -j$(nproc)
-          ninja install
+          fi
+
+          cmake --build "$TESS_BUILD" -- -j$(nproc)
+          cmake --install "$TESS_BUILD" 
 
       # ─────────────────────────────────────────────
       # 10. Inspect and strip .so

@@ -90,12 +90,12 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
             -DBUILD_SHARED_LIBS=OFF \
-            -DENABLE_WEBP=OFF \
+            -DENABLE_WEBP=ON \
             -DENABLE_OPENJPEG=OFF \
             -DENABLE_GIF=OFF \
             -DENABLE_TIFF=OFF \
-            -DENABLE_JPEG=OFF \
-            -DENABLE_PNG=OFF \
+            -DENABLE_JPEG=ON \
+            -DENABLE_PNG=ON \
             -DENABLE_ZLIB=OFF \
             -DENABLE_PROGRAMS=OFF
           ninja -j$(nproc)

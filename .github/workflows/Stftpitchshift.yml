@@ -81,6 +81,8 @@ jobs:
 
           using namespace stftpitchshift;
 
+          #define EXPORT __attribute__((visibility("default")))
+
           extern "C" {
 
           // Непрерывная обработка float-буфера.
@@ -89,6 +91,7 @@ jobs:
           // framesize     — размер FFT-кадра (рекомендуется 1024 или 2048)
           // hopsize       — шаг (рекомендуется framesize/4)
           // samplerate    — частота дискретизации (напр. 44100)
+          EXPORT
           void stft_pitch_shift(
               const float* input,
               float*       output,
@@ -109,6 +112,7 @@ jobs:
 
           // Poly pitch — несколько факторов одновременно (гармонайзер)
           // factors  — массив из n_factors значений типа double
+          EXPORT
           void stft_pitch_shift_poly(
               const float*  input,
               float*        output,
@@ -130,6 +134,7 @@ jobs:
           }
 
           // Версия библиотеки в виде строки (для проверки загрузки)
+          EXPORT
           const char* stft_version() {
               return "stftPitchShift-capi-1.0";
           }
@@ -139,7 +144,6 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 7. Patch CMakeLists — добавить capi в существующую библиотеку
-      #    (фикс: больше НЕ создаём отдельный target → нет конфликта libstftpitchshift.so)
       # ─────────────────────────────────────────────
       - name: Patch CMakeLists to build shared capi
         run: |
@@ -238,10 +242,3 @@ jobs:
             | ABI | arm64-v8a |
             | Зависимости | статически слинкованы (header-only C++17) |
             | Внешние зависимости .so | только `libc`, `libm`, `libdl` |
-
-            ### Как использовать в плагине (ReMandre)
-
-            ```python
-            __ReqRements__ = {
-                "stftpitchshift": "https://github.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/releases/latest/download/stftpitchshift.so - STFT pitch shifter"
-            }

@@ -71,8 +71,6 @@ jobs:
       # ─────────────────────────────────────────────
       # 6. Write C wrapper (ctypes-friendly API)
       # ─────────────────────────────────────────────
-      # stftPitchShift — C++ header-only library.
-      # Нужна тонкая C-обёртка чтобы вызывать из Python ctypes.
       - name: Write C wrapper
         run: |
           cat > stftPitchShift/capi.cpp << 'EOF'
@@ -140,7 +138,8 @@ jobs:
           EOF
 
       # ─────────────────────────────────────────────
-      # 7. Patch CMakeLists — добавить capi как цель
+      # 7. Patch CMakeLists — добавить capi в существующую библиотеку
+      #    (фикс: больше НЕ создаём отдельный target → нет конфликта libstftpitchshift.so)
       # ─────────────────────────────────────────────
       - name: Patch CMakeLists to build shared capi
         run: |
@@ -148,18 +147,19 @@ jobs:
 
           # ── ReMandre ctypes wrapper ──────────────────────────────────────────
           if(BUILD_SHARED_LIBS)
-            add_library(stftpitchshift_capi SHARED capi.cpp)
-            target_include_directories(stftpitchshift_capi
-              PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp)
-            target_compile_features(stftpitchshift_capi PRIVATE cxx_std_17)
-            set_target_properties(stftpitchshift_capi PROPERTIES
-              OUTPUT_NAME "stftpitchshift"
+            # Добавляем C-обёртку в уже существующую цель stftpitchshift
+            # (VCPKG=ON + LibStftPitchShift.cmake уже создали её)
+            target_sources(stftpitchshift PRIVATE capi.cpp)
+
+            target_compile_features(stftpitchshift PRIVATE cxx_std_17)
+
+            set_target_properties(stftpitchshift PROPERTIES
               CXX_VISIBILITY_PRESET hidden
               VISIBILITY_INLINES_HIDDEN ON)
-            target_link_libraries(stftpitchshift_capi
+
+            # Минимальный размер .so + статическая libstdc++
+            target_link_libraries(stftpitchshift
               PRIVATE "-static-libstdc++ -Wl,--exclude-libs,ALL")
-            install(TARGETS stftpitchshift_capi
-              LIBRARY DESTINATION lib)
           endif()
           # ─────────────────────────────────────────────────────────────────────
           EOF
@@ -179,10 +179,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
             -DBUILD_SHARED_LIBS=ON \
-            -DBUILD_MAIN=OFF \
-            -DBUILD_TESTS=OFF \
-            -DBUILD_EXAMPLES=OFF \
-            -DVCPKG=OFF
+            -DVCPKG=ON \
+            -DVCPKG=ON
 
           cmake --build stftPitchShift/build -- -j$(nproc)
           cmake --install stftPitchShift/build
@@ -247,41 +245,3 @@ jobs:
             __ReqRements__ = {
                 "stftpitchshift": "https://github.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/releases/latest/download/stftpitchshift.so - STFT pitch shifter"
             }
-            ```
-
-            ```python
-            import ctypes, os
-            import numpy as np
-
-            loader = ReMandre.ReLoad.get()
-            lib = loader.loaded_modules["stftpitchshift"]
-
-            lib.stft_pitch_shift.restype  = None
-            lib.stft_pitch_shift.argtypes = [
-                ctypes.POINTER(ctypes.c_float),  # input
-                ctypes.POINTER(ctypes.c_float),  # output
-                ctypes.c_int,                    # length
-                ctypes.c_double,                 # factor  (1.0 = без изменений)
-                ctypes.c_int,                    # framesize (напр. 1024)
-                ctypes.c_int,                    # hopsize   (напр. 256)
-                ctypes.c_double,                 # samplerate (напр. 44100)
-            ]
-
-            # --- пример: сдвинуть массив PCM float на полтора тона вверх ---
-            pcm = np.array([...], dtype=np.float32)   # ваши сэмплы
-            out = np.zeros_like(pcm)
-            lib.stft_pitch_shift(
-                pcm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                len(pcm),
-                2 ** (1.5 / 12),   # +1.5 полутона
-                1024, 256, 44100.0
-            )
-            ```
-
-            > `stft_pitch_shift_poly` — для одновременного наложения нескольких факторов (гармонайзер).
-          files: stftpitchshift.so
-          generate_release_notes: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

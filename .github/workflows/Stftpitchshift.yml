@@ -1,0 +1,287 @@
+name: Build stftPitchShift for Android (ReMandre)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'stftPitchShift-*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      ANDROID_API: 30
+      ABI: arm64-v8a
+      ARCH: aarch64
+      TRIPLE: aarch64-linux-android
+      NDK_VERSION: r27c
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. Checkout
+      # ─────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────
+      # 2. NDK
+      # ─────────────────────────────────────────────
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "${NDK_ZIP}"
+          echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$PWD/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 3. Host tools
+      # ─────────────────────────────────────────────
+      - name: Install host build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build \
+            wget git ca-certificates
+
+      # ─────────────────────────────────────────────
+      # 4. Clone stftPitchShift
+      # ─────────────────────────────────────────────
+      - name: Clone stftPitchShift
+        run: |
+          git clone --depth=1 https://github.com/jurihock/stftPitchShift.git stftPitchShift
+          echo "=== stftPitchShift ===" && git -C stftPitchShift log --oneline -1
+
+      # ─────────────────────────────────────────────
+      # 5. Cross-compile env
+      # ─────────────────────────────────────────────
+      - name: Set cross-compile env
+        run: |
+          echo "CC=${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang"     >> $GITHUB_ENV
+          echo "CXX=${TOOLCHAIN}/bin/${TRIPLE}${ANDROID_API}-clang++"  >> $GITHUB_ENV
+          echo "AR=${TOOLCHAIN}/bin/llvm-ar"                           >> $GITHUB_ENV
+          echo "RANLIB=${TOOLCHAIN}/bin/llvm-ranlib"                   >> $GITHUB_ENV
+          echo "STRIP=${TOOLCHAIN}/bin/llvm-strip"                     >> $GITHUB_ENV
+          echo "SYSROOT=${TOOLCHAIN}/sysroot"                          >> $GITHUB_ENV
+          echo "PREFIX=$PWD/install"                                   >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 6. Write C wrapper (ctypes-friendly API)
+      # ─────────────────────────────────────────────
+      # stftPitchShift — C++ header-only library.
+      # Нужна тонкая C-обёртка чтобы вызывать из Python ctypes.
+      - name: Write C wrapper
+        run: |
+          cat > stftPitchShift/capi.cpp << 'EOF'
+          #include <cstdlib>
+          #include <cstring>
+          #include <vector>
+          #include "cpp/StftPitchShift/StftPitchShift.h"
+
+          using namespace stftpitchshift;
+
+          extern "C" {
+
+          // Непрерывная обработка float-буфера.
+          // input/output  — float[], length семплов
+          // factor        — коэффициент сдвига (1.0 = без изменений, 2.0 = октава вверх)
+          // framesize     — размер FFT-кадра (рекомендуется 1024 или 2048)
+          // hopsize       — шаг (рекомендуется framesize/4)
+          // samplerate    — частота дискретизации (напр. 44100)
+          void stft_pitch_shift(
+              const float* input,
+              float*       output,
+              int          length,
+              double       factor,
+              int          framesize,
+              int          hopsize,
+              double       samplerate)
+          {
+              std::vector<float> in(input, input + length);
+              std::vector<float> out(length);
+
+              StftPitchShift shifter(framesize, hopsize, samplerate);
+              shifter.shiftpitch(in, out, factor);
+
+              std::memcpy(output, out.data(), length * sizeof(float));
+          }
+
+          // Poly pitch — несколько факторов одновременно (гармонайзер)
+          // factors  — массив из n_factors значений типа double
+          void stft_pitch_shift_poly(
+              const float*  input,
+              float*        output,
+              int           length,
+              const double* factors,
+              int           n_factors,
+              int           framesize,
+              int           hopsize,
+              double        samplerate)
+          {
+              std::vector<float>  in(input, input + length);
+              std::vector<float>  out(length);
+              std::vector<double> fv(factors, factors + n_factors);
+
+              StftPitchShift shifter(framesize, hopsize, samplerate);
+              shifter.shiftpitch(in, out, fv);
+
+              std::memcpy(output, out.data(), length * sizeof(float));
+          }
+
+          // Версия библиотеки в виде строки (для проверки загрузки)
+          const char* stft_version() {
+              return "stftPitchShift-capi-1.0";
+          }
+
+          } // extern "C"
+          EOF
+
+      # ─────────────────────────────────────────────
+      # 7. Patch CMakeLists — добавить capi как цель
+      # ─────────────────────────────────────────────
+      - name: Patch CMakeLists to build shared capi
+        run: |
+          cat >> stftPitchShift/CMakeLists.txt << 'EOF'
+
+          # ── ReMandre ctypes wrapper ──────────────────────────────────────────
+          if(BUILD_SHARED_LIBS)
+            add_library(stftpitchshift_capi SHARED capi.cpp)
+            target_include_directories(stftpitchshift_capi
+              PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp)
+            target_compile_features(stftpitchshift_capi PRIVATE cxx_std_17)
+            set_target_properties(stftpitchshift_capi PROPERTIES
+              OUTPUT_NAME "stftpitchshift"
+              CXX_VISIBILITY_PRESET hidden
+              VISIBILITY_INLINES_HIDDEN ON)
+            target_link_libraries(stftpitchshift_capi
+              PRIVATE "-static-libstdc++ -Wl,--exclude-libs,ALL")
+            install(TARGETS stftpitchshift_capi
+              LIBRARY DESTINATION lib)
+          endif()
+          # ─────────────────────────────────────────────────────────────────────
+          EOF
+
+      # ─────────────────────────────────────────────
+      # 8. Build shared .so
+      # ─────────────────────────────────────────────
+      - name: Build stftPitchShift (shared .so)
+        run: |
+          mkdir -p stftPitchShift/build
+          cmake -S stftPitchShift -B stftPitchShift/build \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_STL="c++_static" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_MAIN=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DVCPKG=OFF
+
+          cmake --build stftPitchShift/build -- -j$(nproc)
+          cmake --install stftPitchShift/build
+
+      # ─────────────────────────────────────────────
+      # 9. Inspect and strip .so
+      # ─────────────────────────────────────────────
+      - name: Inspect and strip .so
+        run: |
+          SO=$(find install/lib -name "libstftpitchshift*.so" | head -1)
+          echo "Found: $SO"
+          echo "Size before strip: $(du -sh $SO | cut -f1)"
+          "${TOOLCHAIN}/bin/llvm-readelf" -d "$SO" | grep NEEDED
+          ${STRIP} --strip-unneeded "$SO"
+          echo "Size after strip: $(du -sh $SO | cut -f1)"
+          cp "$SO" stftpitchshift.so
+          echo "SO_PATH=$PWD/stftpitchshift.so" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 10. Get version
+      # ─────────────────────────────────────────────
+      - name: Get stftPitchShift version
+        run: |
+          # Пробуем взять из CMakeLists project(... VERSION x.x.x)
+          VER=$(grep -oP 'project\s*\([^)]*VERSION\s+\K[0-9.]+' stftPitchShift/CMakeLists.txt | head -1)
+          if [ -z "$VER" ]; then VER="git"; fi
+          COMMIT=$(git -C stftPitchShift rev-parse --short HEAD)
+          echo "LIB_VERSION=${VER}-${COMMIT}" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 11. Upload artifact
+      # ─────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stftpitchshift-android-api${{ env.ANDROID_API }}-${{ env.ABI }}
+          path: stftpitchshift.so
+          retention-days: 30
+
+      # ─────────────────────────────────────────────
+      # 12. Create GitHub Release
+      # ─────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "stftPitchShift-${{ env.LIB_VERSION }}"
+          name: "stftPitchShift ${{ env.LIB_VERSION }} · Android API ${{ env.ANDROID_API }} arm64-v8a"
+          body: |
+            ## stftPitchShift — fat .so для ReMandre / exteragram
+
+            | Параметр | Значение |
+            |---|---|
+            | Коммит | `${{ env.LIB_VERSION }}` |
+            | Android API | ${{ env.ANDROID_API }} |
+            | ABI | arm64-v8a |
+            | Зависимости | статически слинкованы (header-only C++17) |
+            | Внешние зависимости .so | только `libc`, `libm`, `libdl` |
+
+            ### Как использовать в плагине (ReMandre)
+
+            ```python
+            __ReqRements__ = {
+                "stftpitchshift": "https://github.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/releases/latest/download/stftpitchshift.so - STFT pitch shifter"
+            }
+            ```
+
+            ```python
+            import ctypes, os
+            import numpy as np
+
+            loader = ReMandre.ReLoad.get()
+            lib = loader.loaded_modules["stftpitchshift"]
+
+            lib.stft_pitch_shift.restype  = None
+            lib.stft_pitch_shift.argtypes = [
+                ctypes.POINTER(ctypes.c_float),  # input
+                ctypes.POINTER(ctypes.c_float),  # output
+                ctypes.c_int,                    # length
+                ctypes.c_double,                 # factor  (1.0 = без изменений)
+                ctypes.c_int,                    # framesize (напр. 1024)
+                ctypes.c_int,                    # hopsize   (напр. 256)
+                ctypes.c_double,                 # samplerate (напр. 44100)
+            ]
+
+            # --- пример: сдвинуть массив PCM float на полтора тона вверх ---
+            pcm = np.array([...], dtype=np.float32)   # ваши сэмплы
+            out = np.zeros_like(pcm)
+            lib.stft_pitch_shift(
+                pcm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                len(pcm),
+                2 ** (1.5 / 12),   # +1.5 полутона
+                1024, 256, 44100.0
+            )
+            ```
+
+            > `stft_pitch_shift_poly` — для одновременного наложения нескольких факторов (гармонайзер).
+          files: stftpitchshift.so
+          generate_release_notes: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

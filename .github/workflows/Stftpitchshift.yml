@@ -76,6 +76,7 @@ jobs:
           cat > stftPitchShift/capi.cpp << 'EOF'
           #include <cstdlib>
           #include <cstring>
+          #include <cmath>
           #include <vector>
           #include "cpp/StftPitchShift/StftPitchShift.h"
 
@@ -83,60 +84,81 @@ jobs:
 
           #define EXPORT __attribute__((visibility("default")))
 
+          // --- Глобальные переменные для эффектов (Состояние) ---
+          static std::vector<float> delay_buffer;
+          static int delay_index = 0;
+          static float osc_phase = 0.0f;
+
           extern "C" {
 
-          // Непрерывная обработка float-буфера.
-          // input/output  — float[], length семплов
-          // factor        — коэффициент сдвига (1.0 = без изменений, 2.0 = октава вверх)
-          // framesize     — размер FFT-кадра (рекомендуется 1024 или 2048)
-          // hopsize       — шаг (рекомендуется framesize/4)
-          // samplerate    — частота дискретизации (напр. 44100)
-          EXPORT
-          void stft_pitch_shift(
-              const float* input,
-              float*       output,
-              int          length,
-              double       factor,
-              int          framesize,
-              int          hopsize,
-              double       samplerate)
-          {
+          // Очистка буферов при начале нового голосового сообщения
+          EXPORT void reset_dsp() {
+              delay_buffer.clear();
+              delay_index = 0;
+              osc_phase = 0.0f;
+          }
+
+          // Наш новый СВЕРХБЫСТРЫЙ процессор эффектов
+          EXPORT void process_dsp(float* buffer, int length, int sample_rate, int effect_id) {
+              // 0 = Без эффекта, 1 = Гелий (только питч), 2 = Бас (только питч)
+              if (effect_id <= 2) return; 
+
+              // Инициализация кольцевого буфера для эха (300 мс)
+              int delay_samples = (int)(0.3f * sample_rate);
+              if (delay_buffer.size() != delay_samples) {
+                  delay_buffer.assign(delay_samples, 0.0f);
+                  delay_index = 0;
+              }
+
+              // Шаги фазы для осцилляторов
+              float phase_inc_robot = 2.0f * M_PI * 40.0f / sample_rate; // 40 Hz модуляция
+              float phase_inc_ghost = 2.0f * M_PI * 3.0f / sample_rate;  // 3 Hz дрожание
+
+              for (int i = 0; i < length; i++) {
+                  float val = buffer[i];
+
+                  // 3: Робот (Ring Modulation)
+                  if (effect_id == 3) {
+                      val *= std::sin(osc_phase);
+                      osc_phase += phase_inc_robot;
+                  }
+                  // 5: Призрак (Тремоло)
+                  else if (effect_id == 5) {
+                      float tremolo = 0.5f + 0.5f * std::sin(osc_phase);
+                      val *= tremolo;
+                      osc_phase += phase_inc_ghost;
+                  }
+
+                  // 4, 5, 6: Эхо (Пещера, Призрак, Инопланетянин)
+                  if (effect_id == 4 || effect_id == 5 || effect_id == 6) {
+                      float echo_val = delay_buffer[delay_index];
+                      val = val + echo_val * 0.5f; // Подмешиваем 50% эха
+                      delay_buffer[delay_index] = val; // Записываем результат обратно (Feedback)
+                      delay_index = (delay_index + 1) % delay_samples;
+                  }
+
+                  // Удерживаем фазу в пределах круга
+                  if (osc_phase > 2.0f * M_PI) osc_phase -= 2.0f * M_PI;
+
+                  // Жесткий лимитер (чтобы звук не трещал при наложении)
+                  if (val > 1.0f) val = 1.0f;
+                  else if (val < -1.0f) val = -1.0f;
+
+                  buffer[i] = val;
+              }
+          }
+
+          // --- Старые функции Pitch Shift ---
+          EXPORT void stft_pitch_shift(const float* input, float* output, int length, double factor, int framesize, int hopsize, double samplerate) {
               std::vector<float> in(input, input + length);
               std::vector<float> out(length);
-
               StftPitchShift shifter(framesize, hopsize, samplerate);
               shifter.shiftpitch(in, out, factor);
-
               std::memcpy(output, out.data(), length * sizeof(float));
           }
 
-          // Poly pitch — несколько факторов одновременно (гармонайзер)
-          // factors  — массив из n_factors значений типа double
-          EXPORT
-          void stft_pitch_shift_poly(
-              const float*  input,
-              float*        output,
-              int           length,
-              const double* factors,
-              int           n_factors,
-              int           framesize,
-              int           hopsize,
-              double        samplerate)
-          {
-              std::vector<float>  in(input, input + length);
-              std::vector<float>  out(length);
-              std::vector<double> fv(factors, factors + n_factors);
-
-              StftPitchShift shifter(framesize, hopsize, samplerate);
-              shifter.shiftpitch(in, out, fv);
-
-              std::memcpy(output, out.data(), length * sizeof(float));
-          }
-
-          // Версия библиотеки в виде строки (для проверки загрузки)
-          EXPORT
-          const char* stft_version() {
-              return "stftPitchShift-capi-1.0";
+          EXPORT const char* stft_version() {
+              return "stftPitchShift-VoiceFX-2.0";
           }
 
           } // extern "C"

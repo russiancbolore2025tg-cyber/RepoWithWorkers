@@ -1,0 +1,351 @@
+name: Build VoiceFX (arm64-v8a)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: "27.2.12479018"
+      ANDROID_API: "30"
+      ABI: "arm64-v8a"
+
+    steps:
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Clone SoundTouch
+        run: git clone --depth=1 https://codeberg.org/soundtouch/soundtouch.git soundtouch
+
+      - name: Write CMakeLists.txt
+        run: |
+          mkdir -p project/jni
+          cat > project/CMakeLists.txt << 'ENDOFCMAKE'
+          cmake_minimum_required(VERSION 3.22)
+          project(voicefx LANGUAGES CXX)
+          set(ST_INCLUDE_DIR "" CACHE PATH "")
+          set(ST_LIB_DIR     "" CACHE PATH "")
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_CXX_EXTENSIONS OFF)
+          if(ANDROID_ABI STREQUAL "arm64-v8a")
+            add_compile_options(-O3 -march=armv8-a+simd -ffast-math -fvisibility=hidden)
+          endif()
+          add_library(SoundTouch STATIC IMPORTED)
+          find_library(ST_LIB_PATH NAMES SoundTouch soundtouch PATHS "${ST_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+          set_target_properties(SoundTouch PROPERTIES IMPORTED_LOCATION "${ST_LIB_PATH}")
+          add_library(voicefx SHARED jni/voice_fx.cpp)
+          target_include_directories(voicefx PRIVATE "${ST_INCLUDE_DIR}" "${ST_INCLUDE_DIR}/soundtouch")
+          target_link_libraries(voicefx PRIVATE SoundTouch log m)
+          set_target_properties(voicefx PROPERTIES
+            C_VISIBILITY_PRESET hidden
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+            LINK_FLAGS "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/jni/exports.map"
+            OUTPUT_NAME "voicefx"
+          )
+          ENDOFCMAKE
+
+      - name: Write exports.map
+        run: |
+          cat > project/jni/exports.map << 'ENDOFMAP'
+          {
+            global: vfx_*;
+            local: *;
+          };
+          ENDOFMAP
+
+      - name: Write voice_fx.cpp
+        run: |
+          cat > project/jni/voice_fx.cpp << 'ENDOFCPP'
+          /**
+           * voice_fx.cpp — libvoicefx.so
+           * Нативная обёртка над SoundTouch для изменения голоса.
+           * Используется из Python через ctypes / ReMandre (ExteraGram).
+           */
+          #include <cstring>
+          #include <cstdlib>
+          #include <cmath>
+          #include <new>
+          #include <algorithm>
+          #include "SoundTouch.h"
+          using namespace soundtouch;
+
+          #define VFX_VERSION "1.0.0"
+          static constexpr int   MAX_CHANNELS    = 2;
+          static constexpr int   MAX_SAMPLE_RATE = 192000;
+          static constexpr int   MIN_SAMPLE_RATE = 8000;
+          static constexpr float MAX_PITCH_ST    = 24.0f;
+          static constexpr float MAX_TEMPO       = 200.0f;
+          static constexpr float MIN_TEMPO       = -95.0f;
+          static constexpr float MAX_RATE        = 200.0f;
+          static constexpr float MIN_RATE        = -95.0f;
+
+          struct VfxHandle {
+            SoundTouch st;
+            int    sample_rate   = 44100;
+            int    channels      = 1;
+            float  pitch_st      = 0.0f;
+            float  tempo_pct     = 0.0f;
+            float  rate_pct      = 0.0f;
+            char   preset_name[64] = "none";
+            bool   use_aa_filter   = true;
+            int    aa_filter_length = 64;
+            bool   use_quickseek   = false;
+            int    sequence_ms     = 0;
+            int    seekwindow_ms   = 0;
+            int    overlap_ms      = 0;
+
+            void apply_params() {
+              st.setPitchSemiTones(pitch_st);
+              st.setTempoChange(tempo_pct);
+              st.setRateChange(rate_pct);
+              st.setSampleRate((uint)sample_rate);
+              st.setChannels((uint)channels);
+              st.setSetting(SETTING_USE_AA_FILTER,    use_aa_filter ? 1 : 0);
+              st.setSetting(SETTING_AA_FILTER_LENGTH, aa_filter_length);
+              st.setSetting(SETTING_USE_QUICKSEEK,    use_quickseek ? 1 : 0);
+              if (sequence_ms   > 0) st.setSetting(SETTING_SEQUENCE_MS,   sequence_ms);
+              if (seekwindow_ms > 0) st.setSetting(SETTING_SEEKWINDOW_MS, seekwindow_ms);
+              if (overlap_ms    > 0) st.setSetting(SETTING_OVERLAP_MS,    overlap_ms);
+            }
+          };
+
+          #define VFX_EXPORT extern "C" __attribute__((visibility("default")))
+
+          static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+          static int   clampi(int v,   int lo,   int hi)   { return v < lo ? lo : (v > hi ? hi : v); }
+
+          /* ── Жизненный цикл ─────────────────────────────────────────────── */
+          VFX_EXPORT void* vfx_create() {
+            VfxHandle* h = new (std::nothrow) VfxHandle();
+            if (!h) return nullptr;
+            h->apply_params();
+            return h;
+          }
+          VFX_EXPORT void vfx_destroy(void* handle) { delete static_cast<VfxHandle*>(handle); }
+          VFX_EXPORT void vfx_reset(void* handle)   { if (handle) static_cast<VfxHandle*>(handle)->st.clear(); }
+          VFX_EXPORT int  vfx_is_valid(void* handle){ return handle ? 1 : 0; }
+
+          /* ── Параметры сигнала ──────────────────────────────────────────── */
+          VFX_EXPORT void vfx_set_sample_rate(void* handle, int sr) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->sample_rate = clampi(sr, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
+            h->st.setSampleRate((uint)h->sample_rate);
+          }
+          VFX_EXPORT void vfx_set_channels(void* handle, int ch) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->channels = clampi(ch, 1, MAX_CHANNELS);
+            h->st.setChannels((uint)h->channels);
+          }
+
+          /* ── Параметры эффекта ──────────────────────────────────────────── */
+          VFX_EXPORT void vfx_set_pitch_semitones(void* handle, float st_) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->pitch_st = clampf(st_, -MAX_PITCH_ST, MAX_PITCH_ST);
+            h->st.setPitchSemiTones(h->pitch_st);
+          }
+          VFX_EXPORT void vfx_set_tempo(void* handle, float pct) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->tempo_pct = clampf(pct, MIN_TEMPO, MAX_TEMPO);
+            h->st.setTempoChange(h->tempo_pct);
+          }
+          VFX_EXPORT void vfx_set_rate(void* handle, float pct) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->rate_pct = clampf(pct, MIN_RATE, MAX_RATE);
+            h->st.setRateChange(h->rate_pct);
+          }
+          VFX_EXPORT void vfx_set_quality(void* handle,
+              int aa, int aa_len, int qs, int seq, int seek, int olap) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            h->use_aa_filter    = (aa != 0);
+            h->aa_filter_length = (aa_len > 0) ? aa_len : 64;
+            h->use_quickseek    = (qs != 0);
+            h->sequence_ms      = (seq  > 0) ? seq  : 0;
+            h->seekwindow_ms    = (seek > 0) ? seek : 0;
+            h->overlap_ms       = (olap > 0) ? olap : 0;
+            h->apply_params();
+          }
+
+          /* ── Пресеты ────────────────────────────────────────────────────── */
+          static void set_preset(VfxHandle* h, const char* name,
+              float pitch, float tempo, float rate, bool qs=false) {
+            strncpy(h->preset_name, name, sizeof(h->preset_name)-1);
+            h->preset_name[sizeof(h->preset_name)-1] = '\0';
+            h->pitch_st      = clampf(pitch, -MAX_PITCH_ST, MAX_PITCH_ST);
+            h->tempo_pct     = clampf(tempo, MIN_TEMPO, MAX_TEMPO);
+            h->rate_pct      = clampf(rate,  MIN_RATE,  MAX_RATE);
+            h->use_quickseek = qs;
+            h->apply_params();
+          }
+          VFX_EXPORT void vfx_preset_chipmunk(void* h)    { if (h) set_preset((VfxHandle*)h, "chipmunk",    8.0f,  15.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_deep(void* h)         { if (h) set_preset((VfxHandle*)h, "deep",       -5.0f,  -8.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_fast(void* h)         { if (h) set_preset((VfxHandle*)h, "fast",        0.0f,  60.0f,  0.0f, true); }
+          VFX_EXPORT void vfx_preset_slow(void* h)         { if (h) set_preset((VfxHandle*)h, "slow",        0.0f, -35.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_old_man(void* h)      { if (h) set_preset((VfxHandle*)h, "old_man",    -4.0f, -20.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_child(void* h)        { if (h) set_preset((VfxHandle*)h, "child",       6.0f,  20.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_alien(void* h)        { if (h) set_preset((VfxHandle*)h, "alien",      12.0f,   0.0f, 25.0f); }
+          VFX_EXPORT void vfx_preset_giant(void* h)        { if (h) set_preset((VfxHandle*)h, "giant",      -8.0f,   0.0f,-20.0f); }
+          VFX_EXPORT void vfx_preset_drunk(void* h)        { if (h) set_preset((VfxHandle*)h, "drunk",      -1.0f, -10.0f, 10.0f); }
+          VFX_EXPORT void vfx_preset_megaphone(void* h)    { if (h) set_preset((VfxHandle*)h, "megaphone",   2.0f,   5.0f,  0.0f); }
+          VFX_EXPORT void vfx_preset_darth_vader(void* h)  { if (h) set_preset((VfxHandle*)h, "darth_vader",-10.0f, -5.0f,-15.0f); }
+          VFX_EXPORT void vfx_preset_robot(void* h) {
+            if (!h) return;
+            auto* hh = (VfxHandle*)h;
+            set_preset(hh, "robot", -3.0f, 0.0f, 0.0f, true);
+            hh->sequence_ms = 20; hh->seekwindow_ms = 8; hh->overlap_ms = 3;
+            hh->apply_params();
+          }
+
+          /* ── Кастомный голос ────────────────────────────────────────────── */
+          VFX_EXPORT void vfx_custom_voice(void* handle, const char* name,
+              float pitch, float tempo, float rate,
+              int qs, int seq, int seek, int olap) {
+            if (!handle) return;
+            auto* h = static_cast<VfxHandle*>(handle);
+            strncpy(h->preset_name, (name && *name) ? name : "custom", sizeof(h->preset_name)-1);
+            h->preset_name[sizeof(h->preset_name)-1] = '\0';
+            h->pitch_st      = clampf(pitch, -MAX_PITCH_ST, MAX_PITCH_ST);
+            h->tempo_pct     = clampf(tempo, MIN_TEMPO, MAX_TEMPO);
+            h->rate_pct      = clampf(rate,  MIN_RATE,  MAX_RATE);
+            h->use_quickseek = (qs != 0);
+            h->sequence_ms   = (seq  > 0) ? seq  : 0;
+            h->seekwindow_ms = (seek > 0) ? seek : 0;
+            h->overlap_ms    = (olap > 0) ? olap : 0;
+            h->apply_params();
+          }
+
+          /* ── Геттеры ────────────────────────────────────────────────────── */
+          VFX_EXPORT float       vfx_get_pitch(void* h)       { return h ? ((VfxHandle*)h)->pitch_st    : 0.0f; }
+          VFX_EXPORT float       vfx_get_tempo(void* h)       { return h ? ((VfxHandle*)h)->tempo_pct   : 0.0f; }
+          VFX_EXPORT float       vfx_get_rate(void* h)        { return h ? ((VfxHandle*)h)->rate_pct    : 0.0f; }
+          VFX_EXPORT int         vfx_get_sample_rate(void* h) { return h ? ((VfxHandle*)h)->sample_rate : 0; }
+          VFX_EXPORT int         vfx_get_channels(void* h)    { return h ? ((VfxHandle*)h)->channels    : 0; }
+          VFX_EXPORT const char* vfx_get_preset_name(void* h) { return h ? ((VfxHandle*)h)->preset_name : "unknown"; }
+          VFX_EXPORT int         vfx_effective_latency_samples(void* h) {
+            return h ? (int)((VfxHandle*)h)->st.getSetting(SETTING_INITIAL_LATENCY) : 0;
+          }
+
+          /* ── Обработка аудио ────────────────────────────────────────────── */
+          VFX_EXPORT int vfx_process(void* handle, const float* in, int in_n, float* out, int out_max) {
+            if (!handle || !in || in_n<=0 || !out || out_max<=0) return 0;
+            auto* h = (VfxHandle*)handle;
+            h->st.putSamples(in, (uint)in_n);
+            return (int)h->st.receiveSamples(out, (uint)out_max);
+          }
+          VFX_EXPORT int vfx_flush(void* handle, float* out, int out_max) {
+            if (!handle || !out || out_max<=0) return 0;
+            auto* h = (VfxHandle*)handle;
+            h->st.flush();
+            return (int)h->st.receiveSamples(out, (uint)out_max);
+          }
+          VFX_EXPORT int vfx_process_all(void* handle, const float* in, int in_n, float* out, int out_max) {
+            if (!handle || !in || in_n<=0 || !out || out_max<=0) return 0;
+            auto* h = (VfxHandle*)handle;
+            h->st.putSamples(in, (uint)in_n);
+            int total = 0, rem = out_max;
+            while (rem > 0) { int g=(int)h->st.receiveSamples(out+total*h->channels,(uint)rem); if(!g) break; total+=g; rem-=g; }
+            if (rem > 0) { h->st.flush(); while(rem>0){int g=(int)h->st.receiveSamples(out+total*h->channels,(uint)rem);if(!g)break;total+=g;rem-=g;} }
+            return total;
+          }
+          VFX_EXPORT int vfx_process_s16(void* handle, const short* in, int in_n, short* out, int out_max) {
+            if (!handle || !in || in_n<=0 || !out || out_max<=0) return 0;
+            auto* h = (VfxHandle*)handle;
+            int ch = h->channels;
+            float* fi = new(std::nothrow) float[in_n*ch];
+            float* fo = new(std::nothrow) float[out_max*ch];
+            if (!fi || !fo) { delete[]fi; delete[]fo; return 0; }
+            for (int i=0;i<in_n*ch;++i) fi[i]=in[i]/32768.0f;
+            h->st.putSamples(fi,(uint)in_n);
+            int got=(int)h->st.receiveSamples(fo,(uint)out_max);
+            for (int i=0;i<got*ch;++i) { float v=fo[i]*32767.0f; out[i]=(short)(v>32767?32767:(v<-32768?-32768:v)); }
+            delete[]fi; delete[]fo;
+            return got;
+          }
+
+          /* ── Инфо ───────────────────────────────────────────────────────── */
+          VFX_EXPORT const char* vfx_version()            { return VFX_VERSION " (SoundTouch " SOUNDTOUCH_VERSION ")"; }
+          VFX_EXPORT const char* vfx_soundtouch_version() { return SOUNDTOUCH_VERSION; }
+          VFX_EXPORT const char* vfx_preset_list()        { return "none,chipmunk,deep,robot,fast,slow,old_man,child,alien,giant,drunk,megaphone,darth_vader,custom"; }
+          ENDOFCPP
+
+      - name: Build SoundTouch (static, arm64-v8a)
+        run: |
+          TOOLCHAIN=$ANDROID_NDK/build/cmake/android.toolchain.cmake
+          cmake -S soundtouch -B build_soundtouch \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI=${{ env.ABI }} \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=$(pwd)/soundtouch_install \
+            -DSOUNDTOUCH_DLL=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DSOUNDSTRETCH=OFF \
+            -DSOUNDTOUCH_FLOAT_SAMPLES=ON
+          cmake --build build_soundtouch --config Release --parallel $(nproc)
+          cmake --install build_soundtouch
+
+      - name: Build libvoicefx.so
+        run: |
+          TOOLCHAIN=$ANDROID_NDK/build/cmake/android.toolchain.cmake
+          ST_INSTALL=$(pwd)/soundtouch_install
+          cmake -S project -B build_voicefx \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI=${{ env.ABI }} \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DST_INCLUDE_DIR="$ST_INSTALL/include" \
+            -DST_LIB_DIR="$ST_INSTALL/lib"
+          cmake --build build_voicefx --config Release --parallel $(nproc)
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp build_voicefx/libvoicefx.so dist/
+          LIBCPP="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          [ -f "$LIBCPP" ] && cp "$LIBCPP" dist/ || true
+          echo "=== Built ===" && ls -lh dist/
+          echo "=== ELF ===" && file dist/libvoicefx.so
+          echo "=== Exports ===" && \
+            $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm \
+              --defined-only --extern-only dist/libvoicefx.so 2>/dev/null | grep vfx_ || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvoicefx-arm64-v8a
+          path: dist/
+          retention-days: 90
+
+      - name: Create Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "VoiceFX arm64-v8a #${{ github.run_number }}"
+          body: |
+            Собрано из SoundTouch (codeberg.org/soundtouch/soundtouch)
+            ABI: arm64-v8a · API ${{ env.ANDROID_API }}+
+          files: |
+            dist/libvoicefx.so
+            dist/libc++_shared.so
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
